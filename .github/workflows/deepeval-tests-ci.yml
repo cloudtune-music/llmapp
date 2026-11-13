@@ -1,0 +1,109 @@
+name: DeepEval Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'deepeval-tests/**'
+      - 'llm-multiroute/**'
+      - '.github/workflows/deepeval-tests-ci.yml'
+  workflow_dispatch:
+
+env:
+  OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+  OLLAMA_BASE_URL: ${{ secrets.OLLAMA_BASE_URL }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  # Judge model for LLM-as-a-judge metrics (see deepeval-tests/conftest.py).
+  # Calls Ollama Cloud directly, authenticated with OLLAMA_API_KEY. A ":cloud"
+  # model via a local daemon returns 401 here because the runner isn't signed in.
+  DEEPEVAL_JUDGE_PROVIDER: ollama
+  DEEPEVAL_JUDGE_MODEL: glm-5.2
+  DEEPEVAL_JUDGE_BASE_URL: https://ollama.com
+
+jobs:
+  deepeval:
+    name: DeepEval LLM Evaluation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: deepeval-tests/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r deepeval-tests/requirements.txt
+
+      - name: Build and start backend
+        run: docker compose up -d llm-multiroute
+
+      - name: Check Ollama Cloud judge access
+        run: |
+          if [ -z "$OLLAMA_API_KEY" ]; then
+            echo "::error::OLLAMA_API_KEY secret is not set; the judge model needs it."
+            exit 1
+          fi
+          # /api/chat enforces auth (/api/tags does not); 1-token request.
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $OLLAMA_API_KEY" \
+            -d "{\"model\":\"$DEEPEVAL_JUDGE_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ok\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" \
+            "$DEEPEVAL_JUDGE_BASE_URL/api/chat")
+          if [ "$status" != "200" ]; then
+            echo "::error::Judge model check failed (HTTP $status). 401 = bad/missing OLLAMA_API_KEY, 404 = unknown DEEPEVAL_JUDGE_MODEL."
+            exit 1
+          fi
+
+      - name: Wait for backend to be ready
+        id: backend
+        run: |
+          echo "Waiting for backend to be ready..."
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8080/api/ai/routes > /dev/null 2>&1; then
+              echo "Backend is ready."
+              exit 0
+            fi
+            echo "Attempt $i/30 - backend not ready yet..."
+            sleep 5
+          done
+          echo "Backend failed to start."
+          docker compose logs llm-multiroute
+          exit 1
+
+      - name: Run DeepEval classify tests
+        # Run even if an earlier test step failed (the job still ends as failed),
+        # but only once setup succeeded and the backend is up.
+        if: ${{ !cancelled() && steps.backend.outcome == 'success' }}
+        working-directory: deepeval-tests
+        run: deepeval test run test_classify.py -v
+
+      - name: Run DeepEval sentiment tests
+        # Run even if an earlier test step failed (the job still ends as failed),
+        # but only once setup succeeded and the backend is up.
+        if: ${{ !cancelled() && steps.backend.outcome == 'success' }}
+        working-directory: deepeval-tests
+        run: deepeval test run test_sentiment.py -v
+
+      - name: Run DeepEval summarize tests
+        # Run even if an earlier test step failed (the job still ends as failed),
+        # but only once setup succeeded and the backend is up.
+        if: ${{ !cancelled() && steps.backend.outcome == 'success' }}
+        working-directory: deepeval-tests
+        run: deepeval test run test_summarize.py -v
+
+      - name: Run DeepEval intent tests
+        # Run even if an earlier test step failed (the job still ends as failed),
+        # but only once setup succeeded and the backend is up.
+        if: ${{ !cancelled() && steps.backend.outcome == 'success' }}
+        working-directory: deepeval-tests
+        run: deepeval test run test_intent.py -v
+
+      - name: Tear down backend
+        if: always()
+        run: docker compose down

@@ -1,0 +1,31 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# JavaScript / Promptfoo
+node_modules/
+.promptfoo/
+promptfoo-tests/.promptfoo/
+
+# DeepEval local state
+.deepeval/
+
+# Generated files
+*.log
+.DS_Store
+.idea/
+.vscode/
